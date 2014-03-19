@@ -7,6 +7,28 @@
  * input, and puts the result in output.
  * input and output are on the GPU*/
 public void fftderiv3(float* input, int size, float* output, int axis) {
+  if (axis < 1 || axis > 3) {
+    //TODO: fail
+  } 
+
+  cufftComplex* intermediate_gpu;
+  cudaMalloc(&intermediate_gpu, size*size*(size/2+1)); // expensive
+  
+  cufftHandle plan;
+  int data_dist; // space between points in a signal
+  int signals_dist; // space between different signals
+  
+  if (axis == 1) {
+
+  } else if (axis == 2) {
+    data_dist = size;
+    signals_dist = 
+  } else if (axis == 3) {
+    data_dist = 1;
+    signals_dist = size;
+  }
+}
+public void fftderiv3(float* input, int size, float* output, int axis) {
   // general plan: transform a row at a time.
   // this means move rows around to be compatible and then
   // move them back later (w memcpy) into output. Then parallel multiply i
