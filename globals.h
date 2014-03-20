@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 // for cuda error checking (from SO)
-# define cudaCheckErrors(msg) \
+#define cudaCheckErrors(msg) \
   do { \
     cudaError_t __err = cudaGetLastError(); \
     if (__err != cudaSuccess) { \

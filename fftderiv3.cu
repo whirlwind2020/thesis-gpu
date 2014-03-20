@@ -8,117 +8,151 @@
  * input and output are on the GPU*/
 public void fftderiv3(float* input, int size, float* output, int axis) {
   if (axis < 1 || axis > 3) {
-    //TODO: fail
+    //TODO: fail hard
   } 
 
   cufftComplex* intermediate_gpu;
   cudaMalloc(&intermediate_gpu, size*size*(size/2+1)); // expensive
   
   cufftHandle plan;
-  int data_dist; // space between points in a signal
-  int signals_dist; // space between different signals
-  
-  if (axis == 1) {
+  cufftResult res;
 
-  } else if (axis == 2) {
-    data_dist = size;
-    signals_dist = 
-  } else if (axis == 3) {
-    data_dist = 1;
-    signals_dist = size;
-  }
-}
-public void fftderiv3(float* input, int size, float* output, int axis) {
-  // general plan: transform a row at a time.
-  // this means move rows around to be compatible and then
-  // move them back later (w memcpy) into output. Then parallel multiply i
-  // cuComplex has c.r and c.i for real and imaginary
-  
-  cufftComplex* intermediate_gpu;
-  cudaMalloc(&intermediate_gpu, size*size*(size/2+1)); //'spensive
+  if (axis != 2) {
+    int i_stride, i_dist;
+    int o_stride, o_dist;
+    int i_nembed = size*size*size , o_nembed = size*size*(size/2+1);
+    int batch = size*size; // number of rows to be FFT'd
 
-  if (axis == 1) {
-    // for each pair j,k, perform an fft along [][j][k]
-  } else if (axis == 2) {
+    if (axis == 1) {
+      /* [1][0][0] to [0][0][0] is n^2, but they are
+       * adjacent in signal-space. */
+      i_stride = o_stride = size*size;
+      i_dist = o_dist = 1;
 
-  } else if (axis == 3) {
-    // for each pair i,j perform fft along [i][j]
-    cufftHandle plan;
-    cufftPlan1d(&plan, size, CUFFT_R2C, size*size); //batch size^2 for each col
-
-    int complexsize = size/2 + 1;
-    
-    float* thisrow_gpu;
-    cufftComplex* thisrowxform_gpu;
-    cudaMalloc(&thisrow_gpu, size);
-    cudaMalloc(&thisrowxform_gpu, complexsize*sizeof(cufftComplex));
-    
-    // do all n ffts
-    cudaExecR2C(plan, input, intermediate_gpu, CUFFT_FORWARD);
-    int i, j;
-    for (i = 0; i < size; i++) {
-      for (j = 0; j < size; j++) {
-        cudaMemcpy(thisrow_gpu, input + size*size*i + size*j, 
-                    size*sizeof(float), cudaMemcpyDeviceToDevice);
-        cudaExecR2C(plan, thisrow_gpu, thisrowxform_gpu, CUFFT_FORWARD);
-        // now move it to our 3d fft box
-        cudaMemcpy(intermediate_gpu+size*size*i+size*j, thisrowxform_gpu,
-                    complexsize*sizeof(cufftComplex), cudaMemcpyDeviceToDevice);
-      }
+    } else if (axis == 3) {
+      /* simple case. we have size^2 consecutive
+       * signals of length size */ 
+      i_stride = o_stride = 1;
+      i_dist = o_dist = size;
     }
 
-    // free resources
-    cufftDestroy(plan);
+    /* now that we've set our stride and between-signals distance*/
+    res = cufftPlanMany(&plan, 1, &size, &i_nembed, 
+        i_stride, i_dist, &o_nembed, o_stride, o_dist,
+        CUFFT_R2C, batch);
+    res = cufftExecR2C(plan, input, intermediate_gpu);
 
+  } else { /* axis == 2*/
+    /* more complicated for Y. 
+     * stride b/n consecutive signal values is size
+     * for fixed x, signals start at 0:n-1
+     * but incraesed x repeats at size*size (loop over x) */
+    int i_stride = size, o_stride = size;
+    int i_dist = 1, o_dist = 1;
+    int i_nembed = size*size, o_nembed = size*(size/2+1);
 
-    // intermediate_gpu contains fft(input, axis)
-    // parallel multiply index j by ij (imaginary unit)
+    res = cufftPlanMany(&plan, 1, &size, &i_nembed,
+        i_stride, i_dist, &o_nembed, o_stride, o_dist,
+        CUFFT_R2C, size);
 
-    // this dimension assumes z direction
-    dim3 blocks(size, size, size/2 + 1);
-    deriv_multiplier<<<blocks, 1>>>(intermediate, size, axis);
-
-
-    // now inverse fft
-    
-      
-    
+    int x;
+    for (x = 0; x < size; x++) {
+      res = cufftExecR2C(plan, input+size*x, intermediate_gpu+size*x);
+      //TODO: wrong. adjust for size/2+1. also is it +size*size*x?
+    }
   }
+
+  res = cufftDestroy(plan);
+
+  // intermediate_gpu is now populated with FFT, deriv
+  dim3 blocks(size, size);
+  deriv_multiply<<<blocks, 1>>>(intermediate_gpu, size, axis);
+
+  // now i fft
+  int n_freqs = size/2+1;
+  if (axis != 2) {
+    int i_stride, i_dist;
+    int o_stride, o_dist;
+    int i_nembed = size*size*(size/2+1), o_nembed = size*size*size;
+    int batch = size*size; 
+
+    if (axis == 1) {
+      i_stride = o_stride = size*size;
+      i_dist = o_dist = 1;
+
+    } else if (axis == 3) {
+      /* simple case */
+      i_stride = o_stride = 1;
+      i_dist = o_dist = size;
+    }
+    
+
+    res = cufftPlanMany(&plan, 1, &n_freqs, &i_nembed,
+        i_stride, i_dist, &o_nembed, o_stride, o_dist,
+        CUFFT_C2R, batch);
+    res = cufftExecC2R(plan, intermediate_gpu, output); 
+  } else { /* axis == 2 */
+    int i_stride = size; o_stride = size;
+    int i_dist = 1, o_dist = 1;
+    int i_nembed = size*(size/2+1), o_nembed = size*size;
+
+    res = cufftPlanMany(&plan, 1, &n_freqs, &i_nembed,
+        i_stride, i_dist, &o_nembed, o_stride, o_dist,
+        CUFFT_C2R, size);
+
+    int x;
+    for (x = 0; x < size; x++) {
+      res = cufftExecC2R(plan, intermediate_gpu+size*x, output+size*x);
+      //TODO: adjust for size/2+1. also adjust for size*size*x?
+    }
+  }
+
+  res = cufftDestroy(plan);
+  cudaFree(intermediate_gpu);
 }
 
-public void fftderiv3general(float* input, int size, int axis) { 
-  cufftComplex* intermediate_gpu;
-  cudaMalloc(&intermediate_gpu, size*size*(size/2+1)); //'spensive
-
-}
-
-
-
-
-/* method to multiply each element of the matrix by 
- * its index (along axis) and the imaginary unit i.*/
-__global__ void deriv_multiplier(cufftComplex* intermediate, int size, int axis) {
- // so far still assuming in the z direction. double-check later 
+/* take derivative in fourier-space by multiplying 
+ * axis-index by that index times imaginary unit.
+ * Assumes size^2 blocks, each of which goes along a z-row bc caching*/
+__global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axis) {
   int location = blockIdx.x*blockDim.x*blockDim.y;
   location += blockIdx.y*blockDim.y;
-  location += blockIdx.z;
   if (location >= size*size*size) {
-    /* shouldn't happen by blockDim specification*/
+    // TODO: fail
+    return;
+  }
+  if (axis < 1 || axis > 3) {
+    // TODO: fail
     return;
   }
 
-  int location_mult;
-  if (axis == 1)
-    location_mult = blockIdx.x;
-  else if (axis == 2)
-    location_mult = blockIdx.y;
-  else if (axis == 3)
-    location_mult = blockIdx.z;
-  
-  cufftComplex oldval = intermediate[location];
+  cufftComplex oldval = intermediate_gpu[location];
   cufftComplex newval;
-  newval.r = oldval.c*-1*location_mult;
-  newval.c = oldval.r*location_mult;
+  int z;
+  if (axis == 1) {
+    // multiply all these by x
+    for (z = 0; z < size; z++) {
+      newval.c = oldval.r*blockIdx.x;
+      newval.r = oldval.c*-1*blockIdx.x;
+      intermediate_gpu[location] = newval;
+    }
 
-  intermediate[location] = newval;
+  } else if (axis == 2) {
+    // multiply all these by y
+    for (z = 0; z < size; z++) {
+      newval.c = oldval.r*blockIdx.y;
+      newval.r = oldval.c*-1*blockIdx.y;
+      intermediate_gpu[location] = newval;
+    }
+
+  } else if (axis == 3) {
+    // multiply index z by z
+    for (z = 0; z < size; z++) {
+      newval.c = oldval.r*z;
+      newval.r = oldval.c*-1*z;
+      intermediate_gpu[location] = newval;
+    }
+
+  } 
 }
+
