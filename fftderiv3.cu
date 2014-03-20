@@ -12,7 +12,7 @@ public void fftderiv3(float* input, int size, float* output, int axis) {
   } 
 
   cufftComplex* intermediate_gpu;
-  cudaMalloc(&intermediate_gpu, size*size*(size/2+1)); // expensive
+  cudaMalloc(&intermediate_gpu, size*size*(size/2+1)*sizeof(cudaComplex)); // expensive
   
   cufftHandle plan;
   cufftResult res;
@@ -57,8 +57,8 @@ public void fftderiv3(float* input, int size, float* output, int axis) {
 
     int x;
     for (x = 0; x < size; x++) {
-      res = cufftExecR2C(plan, input+size*x, intermediate_gpu+size*x);
-      //TODO: wrong. adjust for size/2+1. also is it +size*size*x?
+      res = cufftExecR2C(plan, input+size*size*x,
+                               intermediate_gpu+size*x);
     }
   }
 
@@ -102,8 +102,8 @@ public void fftderiv3(float* input, int size, float* output, int axis) {
 
     int x;
     for (x = 0; x < size; x++) {
-      res = cufftExecC2R(plan, intermediate_gpu+size*x, output+size*x);
-      //TODO: adjust for size/2+1. also adjust for size*size*x?
+      res = cufftExecC2R(plan, intermediate_gpu+size*size*x, 
+                               output+size*size*x);
     }
   }
 
@@ -117,7 +117,8 @@ public void fftderiv3(float* input, int size, float* output, int axis) {
 __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axis) {
   int location = blockIdx.x*blockDim.x*blockDim.y;
   location += blockIdx.y*blockDim.y;
-  if (location >= size*size*size) {
+  if (location > size*size*(size/2+1)-(size/2+1)) {
+    // since z will range from 0 to size/2
     // TODO: fail
     return;
   }
@@ -126,31 +127,34 @@ __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axi
     return;
   }
 
-  cufftComplex oldval = intermediate_gpu[location];
+  cufftComplex oldval;
   cufftComplex newval;
   int z;
   if (axis == 1) {
     // multiply all these by x
-    for (z = 0; z < size; z++) {
+    for (z = 0; z < size/2+1; z++) {
+      oldval = intermediate_gpu[location+z];
       newval.c = oldval.r*blockIdx.x;
       newval.r = oldval.c*-1*blockIdx.x;
-      intermediate_gpu[location] = newval;
+      intermediate_gpu[location+z] = newval;
     }
 
   } else if (axis == 2) {
     // multiply all these by y
-    for (z = 0; z < size; z++) {
+    for (z = 0; z < size/2+1; z++) {
+      oldval = intermediate_gpu[location+z];
       newval.c = oldval.r*blockIdx.y;
       newval.r = oldval.c*-1*blockIdx.y;
-      intermediate_gpu[location] = newval;
+      intermediate_gpu[location+z] = newval;
     }
 
   } else if (axis == 3) {
     // multiply index z by z
-    for (z = 0; z < size; z++) {
+    for (z = 0; z < size/2+1; z++) {
+      oldval = intermediate_gpu[location+z];
       newval.c = oldval.r*z;
       newval.r = oldval.c*-1*z;
-      intermediate_gpu[location] = newval;
+      intermediate_gpu[location+z] = newval;
     }
 
   } 
