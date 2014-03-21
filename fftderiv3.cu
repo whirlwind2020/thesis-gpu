@@ -133,7 +133,8 @@ void fftderiv3(float* input, int size, float* output, int axis) {
   printf("finished kernelmult\n");
 
   // now i fft
-  int n_freqs = size/2+1;
+  //int n_freqs = size/2+1;
+  int n_freqs = size; //n-point to n-point transform
   if (axis != 2) {
     int i_stride, i_dist;
     int o_stride, o_dist;
