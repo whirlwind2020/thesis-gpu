@@ -1,3 +1,4 @@
+// nvcc -arch sm_21 -o fftderiv3 -run --ptxas-options="-v" -lcufft fftderiv3.cu
 #include <cuda.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -50,6 +51,43 @@ __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axi
     }
 
   } 
+}
+
+void fftderiv3byslice(float* input, int size, float* output, int axis) {
+  cufftResult res;
+  cudaError_t cres;
+
+  cufftComplex* intermediate_gpu;
+  cres = cudaMalloc(&intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex)); // expensive
+  cufftComplex* igpu_host = (cufftComplex*)malloc(size*(size/2+1)*sizeof(cufftComplex));
+  printf("malloc %d\n", cres);
+  
+  cufftHandle plan;
+//below works for axis==2!
+    int i_stride = size, o_stride = size;
+    int i_dist = 1, o_dist = 1;
+    int i_nembed = size*size, o_nembed = size*(size/2+1);
+
+    res = cufftPlanMany(&plan, 1, &size, &i_nembed,
+        i_stride, i_dist, &o_nembed, o_stride, o_dist,
+        CUFFT_R2C, size);
+    printf("yplan %d\n", res);
+
+    int x;
+    for (x = 0; x < size; x++) {
+      res = cufftExecR2C(plan, input+size*size*x,
+                               intermediate_gpu);
+      cudaMemcpy(igpu_host, intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+      printf("ysheet %d: %d\n", x, res);
+      for (int j=0; j<size/2+1; j++) {
+        for (int k=0; k<size; k++) {
+          printf("%f ", ((cufftComplex)*(igpu_host+size*j+k)).x);
+          printf("+%fi ", ((cufftComplex)*(igpu_host+size*j+k)).y);
+        }
+        printf("\n\n");
+      }
+
+    }
 }
 
 /* takes the derivative along specified axis of 
@@ -208,7 +246,8 @@ int main(int argc, char** argv) {
   printf("output malloc res %d\n", res);
   res = cudaMemcpy(gpu_input, input, n*n*n*sizeof(float), cudaMemcpyHostToDevice);
   
-  fftderiv3(gpu_input, n, gpu_output, 2);
+//  fftderiv3(gpu_input, n, gpu_output, 2);
+  fftderiv3byslice(gpu_input, n, gpu_output, 2);
 
   res = cudaMemcpy(output, gpu_output, n*n*n*sizeof(float), cudaMemcpyDeviceToHost);
   for (i = 0; i < n; i++) {

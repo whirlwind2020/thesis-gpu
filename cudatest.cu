@@ -1,3 +1,4 @@
+//nvcc -arch sm_21 -o test -run --ptxas-options="-v" -lcufft cudatest.cu
 #include <cuda.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -43,7 +44,7 @@ int main(int argc, char** argv) {
   float* mat = (float*) malloc(n*n*n*sizeof(float));
   int i,j,k;
   for (i=0; i < n*n*n; i++) {
-    *(mat+i) = i%n;
+    *(mat+i) = i;//%n;
   }
   for (i=0; i<n; i++) {
     printf("======= x sheet %d =====\n", i);
@@ -89,7 +90,7 @@ int main(int argc, char** argv) {
     printf("======= x sheet %d =====\n", i);
     for (j=0; j<n; j++) {
       for (k=0; k<n; k++) {
-        printf("%f ", *(mat+i*n*n+j*n+k));
+        printf("%f ", (*(mat+i*n*n+j*n+k))/(n*n*n));
       }
       printf("\n\n");
     }
