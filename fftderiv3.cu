@@ -8,6 +8,7 @@
  * axis-index by that index times imaginary unit.
  * Assumes size^2 blocks, each of which goes along a z-row bc caching*/
 __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axis) {
+  float totaldim = (float)size; // scaling factor to normalize
   int location = blockIdx.x*blockDim.x*blockDim.y;
   location += blockIdx.y*blockDim.y;
   if (location > size*size*(size/2+1)-(size/2+1)) {
@@ -33,12 +34,19 @@ __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axi
     }
 
   } else if (axis == 2) {
+    int idx = blockIdx.x*size*(size/2+1) + blockIdx.y*size;
     // multiply all these by y
-    for (z = 0; z < size/2+1; z++) {
-      oldval = intermediate_gpu[location+z];
+    for (z = 0; z < size; z++) {
+      oldval = intermediate_gpu[idx+z];
+      /* by imaginary unit times y */
       newval.y = oldval.x*blockIdx.y;
-      newval.x = oldval.y*-1*blockIdx.y;
-      intermediate_gpu[location+z] = newval;
+      newval.x = oldval.y*blockIdx.y;
+      
+      // now scale down
+      newval.x /= totaldim;
+      newval.y /= totaldim;
+
+      intermediate_gpu[idx+z] = newval;
     }
 
   } else if (axis == 3) {
@@ -58,36 +66,108 @@ void fftderiv3byslice(float* input, int size, float* output, int axis) {
   cudaError_t cres;
 
   cufftComplex* intermediate_gpu;
-  cres = cudaMalloc(&intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex)); // expensive
-  cufftComplex* igpu_host = (cufftComplex*)malloc(size*(size/2+1)*sizeof(cufftComplex));
+  cres = cudaMalloc(&intermediate_gpu, size*size*(size/2+1)*sizeof(cufftComplex)); // expensive
+  cufftComplex* igpu_host = (cufftComplex*)malloc(size*size*(size/2+1)*sizeof(cufftComplex));
   printf("malloc %d\n", cres);
   
   cufftHandle plan;
-//below works for axis==2!
-    int i_stride = size, o_stride = size;
-    int i_dist = 1, o_dist = 1;
-    int i_nembed = size*size, o_nembed = size*(size/2+1);
+  //below works for axis==2!
+  int i_stride = size, o_stride = size;
+  int i_dist = 1, o_dist = 1;
+  int i_nembed = size*size, o_nembed = size*(size/2+1);
 
-    res = cufftPlanMany(&plan, 1, &size, &i_nembed,
-        i_stride, i_dist, &o_nembed, o_stride, o_dist,
-        CUFFT_R2C, size);
-    printf("yplan %d\n", res);
+  res = cufftPlanMany(&plan, 1, &size, &i_nembed,
+      i_stride, i_dist, &o_nembed, o_stride, o_dist,
+      CUFFT_R2C, size);
+  printf("yplan %d\n", res);
 
-    int x;
-    for (x = 0; x < size; x++) {
-      res = cufftExecR2C(plan, input+size*size*x,
-                               intermediate_gpu);
-      cudaMemcpy(igpu_host, intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
-      printf("ysheet %d: %d\n", x, res);
-      for (int j=0; j<size/2+1; j++) {
-        for (int k=0; k<size; k++) {
-          printf("%f ", ((cufftComplex)*(igpu_host+size*j+k)).x);
-          printf("+%fi ", ((cufftComplex)*(igpu_host+size*j+k)).y);
-        }
-        printf("\n\n");
+  int x;
+  for (x = 0; x < size; x++) {
+    res = cufftExecR2C(plan, input+size*size*x,
+        intermediate_gpu+size*(size/2+1)*x);
+    cudaMemcpy(igpu_host, intermediate_gpu+size*(size/2+1)*x, size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+    printf("ysheet %d: %d\n", x, res);
+    for (int j=0; j<size/2+1; j++) {
+      for (int k=0; k<size; k++) {
+        printf("%f ", ((cufftComplex)*(igpu_host+size*j+k)).x);
+        printf("+%fi ", ((cufftComplex)*(igpu_host+size*j+k)).y);
       }
+      printf("\n\n");
+    } 
+  }
+  printf("\n\n");
+  // cleanup
+  cufftDestroy(plan);
+  free(igpu_host);
+  
 
+
+  /* for testing, copy everything over at once and make sure it makes sense  */
+  cufftComplex* fullstuff = (cufftComplex*) malloc(size*size*(size/2+1)*sizeof(cufftComplex));
+  cudaMemcpy(fullstuff, intermediate_gpu, size*size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+  int i,j,k;
+  for(i=0;i<size;i++) {
+    for(j=0;j<size/2+1;j++) {
+      for(k=0;k<size;k++) {
+        int idx = i*size*(size/2+1)+j*size+k;
+        cufftComplex num = (cufftComplex)*(fullstuff+idx);
+        printf("%f +%fi ", num.x, num.y);
+      }
+      printf("\n\n");
     }
+    printf("==== sheet %d ====\n", i);
+  }
+  /* end test move */
+
+  /* multiply to take deriv in fourier-space */
+  dim3 blocks(size, size/2+1);
+  deriv_multiply<<<blocks, 1>>>(intermediate_gpu, size, axis);
+  printf("finished kernel multiplication\n \n ");
+
+  /* confirm stuff still looks reasonabl3e */
+  cudaMemcpy(fullstuff, intermediate_gpu, size*size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+  for(i=0;i<size;i++) {
+    for(j=0;j<size/2+1;j++) {
+      for(k=0;k<size;k++) {
+        int idx = i*size*(size/2+1)+j*size+k;
+        cufftComplex num = (cufftComplex)*(fullstuff+idx);
+        printf("%f +%fi ", num.x, num.y);
+      }
+      printf("\n\n");
+    }
+    printf("==== sheet %d ====\n", i);
+  }
+
+  /* inverse transform */
+  i_stride = size, o_stride = size;
+  i_dist = 1, o_dist = 1;
+  i_nembed = (size/2+1)*size, o_nembed = size*size;
+
+  res = cufftPlanMany(&plan, 1, &size, &i_nembed,
+      i_stride, i_dist, &o_nembed, o_stride, o_dist,
+      CUFFT_C2R, size);
+  printf("yplaninverse %d\n", res);
+
+  float* holder = (float*) malloc(size*size*sizeof(float));
+  for (x = 0; x < size; x++) {
+    res = cufftExecC2R(plan, intermediate_gpu+(size/2+1)*size*x,
+        output+size*size*x);
+    cudaMemcpy(holder, output+size*size*x, size*size*sizeof(float), cudaMemcpyDeviceToHost);
+    printf("yshet %d\n", x);
+    for (int j=0; j<size;j++) {
+      for (int k=0; k<size;k++) {
+        int idx = j*size+k;
+        printf("%f ", (float)*(holder+idx));
+      }
+      printf("\n\n");
+    }
+  }
+
+  free(holder);
+  cudaFree(intermediate_gpu);
+  cufftDestroy(plan);
+    
+
 }
 
 /* takes the derivative along specified axis of 
@@ -231,11 +311,12 @@ int main(int argc, char** argv) {
       for (k = 0; k < n; k++) {
         //*(input+i*n*n+j*n+k) = (float) rand()/ 15.0;
         //*(input+i*n*n+j*n+k) = (float)sin(5*k*PI/180);
-        *(input+i*n*n+j*n+k) = j;
+        int val = n*n*i+n*j+k;
+        *(input+i*n*n+j*n+k) = val;
       }
     }
   }
-  printf("done making random mat\n");
+  printf("done making initial mat\n");
 
   float* gpu_input;
   float* gpu_output;
@@ -253,7 +334,7 @@ int main(int argc, char** argv) {
   for (i = 0; i < n; i++) {
     for (j = 0; j < n; j++) {
       for (k = 0; k < n; k++) {
-        printf("%3.2F ", *(output+i*n*n+j*n+k)); 
+        printf("%f ", *(output+i*n*n+j*n+k)); 
         //printf("%d ", abs(*(output+i*n*n+j*n+k) - *(input+i*n*n+j*n+k)) < .3);
       }
       printf("\n\n");
