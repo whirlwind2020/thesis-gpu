@@ -34,20 +34,10 @@ __global__ void deriv_multiply(cufftComplex* intermediate_gpu, int size, int axi
     }
 
   } else if (axis == 2) {
-    int idx = blockIdx.x*size*(size/2+1) + blockIdx.y*size;
-    // multiply all these by y
-    for (z = 0; z < size; z++) {
-      oldval = intermediate_gpu[idx+z];
-      /* by imaginary unit times y */
-      newval.y = oldval.x*blockIdx.y;
-      newval.x = oldval.y*blockIdx.y;
-      
-      // now scale down
-      newval.x /= totaldim;
-      newval.y /= totaldim;
-
-      intermediate_gpu[idx+z] = newval;
-    }
+    int idx = blockIdx.x*size + threadIdx.x;
+    cufftComplex old=intermediate_gpu[idx];
+    intermediate_gpu[idx].x=-old.y*blockIdx.x/(float)size;
+    intermediate_gpu[idx].y=old.x*blockIdx.x/(float)size;
 
   } else if (axis == 3) {
     // multiply index z by z
@@ -66,11 +56,11 @@ void fftderiv3byslice(float* input, int size, float* output, int axis) {
   cudaError_t cres;
 
   cufftComplex* intermediate_gpu;
-  cres = cudaMalloc(&intermediate_gpu, size*size*(size/2+1)*sizeof(cufftComplex)); // expensive
-  cufftComplex* igpu_host = (cufftComplex*)malloc(size*size*(size/2+1)*sizeof(cufftComplex));
+  cres = cudaMalloc(&intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex)); // expensive
+  cufftComplex* igpu_host = (cufftComplex*)malloc(size*(size/2+1)*sizeof(cufftComplex));
   printf("malloc %d\n", cres);
   
-  cufftHandle plan;
+  cufftHandle plan, planInv;
   //below works for axis==2!
   int i_stride = size, o_stride = size;
   int i_dist = 1, o_dist = 1;
@@ -80,26 +70,44 @@ void fftderiv3byslice(float* input, int size, float* output, int axis) {
       i_stride, i_dist, &o_nembed, o_stride, o_dist,
       CUFFT_R2C, size);
   printf("yplan %d\n", res);
+  i_stride = size, o_stride = size;
+  i_dist = 1, o_dist = 1;
+  i_nembed = (size/2+1)*size, o_nembed = size*size;
+
+  res = cufftPlanMany(&planInv, 1, &size, &i_nembed,
+      i_stride, i_dist, &o_nembed, o_stride, o_dist,
+      CUFFT_C2R, size);
+  printf("yplan inverse %d\n", res);
 
   int x;
+  cudaEvent_t start, stop; float time; cudaEventCreate(&start); cudaEventCreate(&stop); cudaEventRecord(start); //timing code
+
   for (x = 0; x < size; x++) {
     res = cufftExecR2C(plan, input+size*size*x,
-        intermediate_gpu+size*(size/2+1)*x);
-    cudaMemcpy(igpu_host, intermediate_gpu+size*(size/2+1)*x, size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
-    printf("ysheet %d: %d\n", x, res);
+        intermediate_gpu);
+//    cudaMemcpy(igpu_host, intermediate_gpu, size*(size/2+1)*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+/*    printf("ysheet %d: %d\n", x, res);
     for (int j=0; j<size/2+1; j++) {
       for (int k=0; k<size; k++) {
         printf("%f ", ((cufftComplex)*(igpu_host+size*j+k)).x);
         printf("+%fi ", ((cufftComplex)*(igpu_host+size*j+k)).y);
       }
       printf("\n\n");
-    } 
+    }*/
+for (int i=0;i<100;i++)    deriv_multiply<<<size/2+1, size>>>(intermediate_gpu, size, axis);
+    res = cufftExecC2R(planInv, intermediate_gpu,
+        output+size*size*x);
+//    printf("ysheet %d: %d\n", x, res);
   }
-  printf("\n\n");
+//  printf("\n\n");
+  cudaError_t e=cudaGetLastError(); if (e) printf("error: %s\n",cudaGetErrorString(e)); //print if there is an error
+  cudaEventRecord(stop); cudaEventSynchronize( stop ); cudaEventElapsedTime( &time, start, stop ); cudaEventDestroy( start ); cudaEventDestroy( stop ); //end timing
+  printf("Time taken: %fms\n",time);
   // cleanup
   cufftDestroy(plan);
+  cufftDestroy(planInv);
   free(igpu_host);
-  
+  return; 
 
 
   /* for testing, copy everything over at once and make sure it makes sense  */
@@ -111,11 +119,11 @@ void fftderiv3byslice(float* input, int size, float* output, int axis) {
       for(k=0;k<size;k++) {
         int idx = i*size*(size/2+1)+j*size+k;
         cufftComplex num = (cufftComplex)*(fullstuff+idx);
-        printf("%f +%fi ", num.x, num.y);
+//        printf("%f +%fi ", num.x, num.y);
       }
       printf("\n\n");
     }
-    printf("==== sheet %d ====\n", i);
+//    printf("==== sheet %d ====\n", i);
   }
   /* end test move */
 
@@ -300,7 +308,7 @@ void fftderiv3(float* input, int size, float* output, int axis) {
 int main(int argc, char** argv) {
   printf("well, we're here\n.");
 
-  int n = 4;
+  int n = 256;
   float* input = (float*)malloc(n*n*n*sizeof(float));
   float* output = (float*)malloc(n*n*n*sizeof(float));
 
@@ -331,7 +339,7 @@ int main(int argc, char** argv) {
   fftderiv3byslice(gpu_input, n, gpu_output, 2);
 
   res = cudaMemcpy(output, gpu_output, n*n*n*sizeof(float), cudaMemcpyDeviceToHost);
-  for (i = 0; i < n; i++) {
+/*  for (i = 0; i < n; i++) {
     for (j = 0; j < n; j++) {
       for (k = 0; k < n; k++) {
         printf("%f ", *(output+i*n*n+j*n+k)); 
@@ -340,7 +348,7 @@ int main(int argc, char** argv) {
       printf("\n\n");
     }
     printf("======= x sheet %d ==== \n", i);
-  }
+  }*/
 
   free(input); free(output);
   cudaFree(gpu_input); cudaFree(gpu_output);
